@@ -475,6 +475,7 @@ class MigrationCoordinator:
                 client=self.source_client,
                 state=self.state,
                 performance_config=self.config.performance,
+                skip_execution_environment_names=self.config.export.skip_execution_environment_names,
             )
 
             transformer = create_transformer(
@@ -489,6 +490,7 @@ class MigrationCoordinator:
                 state=self.state,
                 performance_config=self.config.performance,
                 resource_mappings=self.config.resource_mappings,
+                skip_execution_environment_names=self.config.export.skip_execution_environment_names,
             )
 
             # Special handling for hosts (bulk operations)

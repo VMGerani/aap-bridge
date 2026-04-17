@@ -454,6 +454,7 @@ def export(
                         ctx.source_client,
                         ctx.migration_state,
                         ctx.config.performance,
+                        skip_execution_environment_names=ctx.config.export.skip_execution_environment_names,
                     )
                 except NotImplementedError as e:
                     # Exporter not implemented yet
@@ -527,7 +528,10 @@ def export(
                     def progress_callback(rtype: str, stats: dict):
                         phase_id = rtype  # We use resource_type as phase_id
                         progress.update_phase(
-                            phase_id, stats.get("exported", 0), stats.get("failed", 0)
+                            phase_id,
+                            stats.get("exported", 0),
+                            stats.get("failed", 0),
+                            stats.get("skipped", 0),
                         )
 
                     # Start all phases before parallel export begins
@@ -578,6 +582,7 @@ def export(
                             ctx.source_client,
                             ctx.migration_state,
                             ctx.config.performance,
+                            skip_execution_environment_names=ctx.config.export.skip_execution_environment_names,
                         )
 
                         # Apply skip_dynamic_hosts filter for hosts
@@ -670,8 +675,9 @@ def export(
                                 failed_count += 1
                                 resource_count += 1
 
-                            # Update progress (including failures)
-                            progress.update_phase(phase_id, resource_count, failed_count)
+                            # Update progress (exported + skipped from exporter, e.g. EE name filter)
+                            skip_ct = exporter.get_stats().get("skipped_count", 0)
+                            progress.update_phase(phase_id, resource_count, failed_count, skip_ct)
 
                             # Write batch when it reaches the limit
                             if len(current_batch) >= records_per_file:
@@ -688,6 +694,9 @@ def export(
                                 )
 
                                 current_batch = []
+
+                        skip_final = exporter.get_stats().get("skipped_count", 0)
+                        progress.update_phase(phase_id, resource_count, failed_count, skip_final)
 
                         # Commit remaining mappings
                         if pending_mappings:
@@ -1547,6 +1556,7 @@ def import_cmd(
                                 ctx.migration_state,
                                 ctx.config.performance,
                                 ctx.config.resource_mappings,
+                                skip_execution_environment_names=ctx.config.export.skip_execution_environment_names,
                             )
                         except NotImplementedError:
                             logger.info(

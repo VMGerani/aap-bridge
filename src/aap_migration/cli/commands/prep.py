@@ -235,7 +235,12 @@ def prep(ctx: MigrationContext, output_dir: Path, force: bool) -> None:
             from aap_migration.schema.persistence import save_schemas
 
             comparisons = {
-                rtype: ComparisonResult(**data)
+                rtype: ComparisonResult.from_transformation_dict(
+                    resource_type=rtype,
+                    data=data,
+                    source_schema=source_schema["schemas"].get(rtype, {}),
+                    target_schema=target_schema["schemas"].get(rtype, {}),
+                )
                 for rtype, data in comparison["transformations"].items()
             }
 

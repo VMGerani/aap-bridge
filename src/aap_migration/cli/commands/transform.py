@@ -295,8 +295,12 @@ def transform(
     with open(metadata_file) as f:
         metadata = json.load(f)
 
+    from aap_migration.cli.commands.migrate import DEFAULT_MIGRATION_EXCLUDED_TYPES
+
     # Determine resource types to transform
     available_types = list(metadata.get("resource_types", {}).keys())
+    if not resource_type:
+        available_types = [t for t in available_types if t not in DEFAULT_MIGRATION_EXCLUDED_TYPES]
     types_to_transform = list(resource_type) if resource_type else available_types
 
     # Sort by dependency order to ensure id_mappings exist for dependent resources

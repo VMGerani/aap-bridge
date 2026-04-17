@@ -37,8 +37,15 @@ logger = get_logger(__name__)
 # Migration phase order - use centralized registry
 MIGRATION_PHASES = ALL_RESOURCE_TYPES
 
-# Excluded from default migrate workflow (operators configure controller topology separately)
-DEFAULT_MIGRATION_EXCLUDED_TYPES = frozenset({"instances", "instance_groups"})
+# Excluded from default migrate / export / transform / import (unless -r names the type)
+DEFAULT_MIGRATION_EXCLUDED_TYPES = frozenset(
+    {
+        "instances",
+        "instance_groups",
+        # inventory_sources optional for many deployments; use -r inventory_sources to include
+        "inventory_sources",
+    }
+)
 
 # Phase 1 import: foundation through projects (before patching projects / inventory that needs SCM)
 # credential_types and credentials are PATCHed (not POSTed) - they're pre-created in target
@@ -55,11 +62,10 @@ PHASE1_RESOURCE_TYPES = [
 ]
 
 # Phase 2 import: patch projects (in import runner), then inventory chain + automation.
-# Inventory sources require patched projects (SCM); hosts last after groups.
 PHASE2_RESOURCE_TYPES = [
     "inventory",
     "constructed_inventories",
-    "inventory_sources",
+    # "inventory_sources",  # skipped by default — add here if you need SCM/dynamic sources on target
     "groups",
     "hosts",
     "notification_templates",

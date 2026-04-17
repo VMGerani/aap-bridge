@@ -13,7 +13,11 @@ from pathlib import Path
 
 import click
 
-from aap_migration.cli.commands.migrate import PHASE1_RESOURCE_TYPES, PHASE2_RESOURCE_TYPES
+from aap_migration.cli.commands.migrate import (
+    DEFAULT_MIGRATION_EXCLUDED_TYPES,
+    PHASE1_RESOURCE_TYPES,
+    PHASE2_RESOURCE_TYPES,
+)
 from aap_migration.cli.commands.patch_projects import patch_project_scm_details
 from aap_migration.cli.context import MigrationContext
 from aap_migration.cli.decorators import handle_errors, pass_context, requires_config
@@ -326,7 +330,11 @@ def export(
     else:
         # No types specified - use discovered or hardcoded, then normalize
         discovered_types = get_exportable_types(use_discovered=True)
-        types_to_export = [normalize_resource_type(rt) for rt in discovered_types]
+        types_to_export = []
+        for rt in discovered_types:
+            nt = normalize_resource_type(rt)
+            if nt not in DEFAULT_MIGRATION_EXCLUDED_TYPES:
+                types_to_export.append(nt)
 
     # Check if parallel resource type export is enabled
     parallel_types_enabled = ctx.config.performance.parallel_resource_types
@@ -979,6 +987,8 @@ def import_cmd(
 
     # Determine resource types to import
     available_types = list(metadata.get("resource_types", {}).keys())
+    if not resource_type:
+        available_types = [t for t in available_types if t not in DEFAULT_MIGRATION_EXCLUDED_TYPES]
     requested_types = list(resource_type) if resource_type else available_types
 
     # Check for missing prerequisite types (REQ-006)
@@ -1571,6 +1581,7 @@ def import_cmd(
                             # Inventory resources (canonical names + legacy aliases)
                             "inventory": "import_inventories",
                             "inventories": "import_inventories",
+                            # Optional: use -r inventory_sources (excluded from default import list)
                             "inventory_sources": "import_inventory_sources",
                             "groups": "import_inventory_groups",
                             "inventory_groups": "import_inventory_groups",

@@ -83,12 +83,13 @@ class MigrationCoordinator:
             "resource_types": ["constructed_inventories"],
             "batch_size": 100,
         },
-        {
-            "name": "inventory_sources",
-            "description": "Inventory Sources",
-            "resource_types": ["inventory_sources"],
-            "batch_size": 100,
-        },
+        # Inventory sources (SCM/dynamic sync) — omitted from default coordinator run; add phase if needed
+        # {
+        #     "name": "inventory_sources",
+        #     "description": "Inventory Sources",
+        #     "resource_types": ["inventory_sources"],
+        #     "batch_size": 100,
+        # },
         {
             "name": "groups",
             "description": "Inventory Groups",

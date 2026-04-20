@@ -14,6 +14,7 @@ from aap_migration.config import MigrationConfig
 from aap_migration.migration.checkpoint import CheckpointManager
 from aap_migration.migration.exporter import create_exporter
 from aap_migration.migration.importer import create_importer
+from aap_migration.migration.inventory_source_sync import sync_inventory_sources_after_import
 from aap_migration.migration.state import MigrationState
 from aap_migration.migration.transformer import SkipResourceError, create_transformer
 from aap_migration.reporting.live_progress import MigrationProgressDisplay
@@ -599,6 +600,7 @@ class MigrationCoordinator:
                 import_succeeded = 0  # Successful imports
                 import_failed = 0  # Failed imports
                 import_skipped = 0  # Already migrated (import-time skips)
+                inventory_source_ids_for_sync: list[int] = []
 
                 for resource in resources_to_import:
                     source_id = resource.pop("_source_id", None)
@@ -612,11 +614,27 @@ class MigrationCoordinator:
                     )
 
                     if result:
-                        stats["imported"] += 1
-                        import_succeeded += 1
-                        # Update progress
-                        if self.progress_tracker:
-                            self.progress_tracker.update_resource(imported=1)
+                        policy_skip = (
+                            isinstance(result, dict)
+                            and result.get("_skipped")
+                            and result.get("policy_skip")
+                        )
+                        if policy_skip:
+                            stats["skipped"] += 1
+                            import_skipped += 1
+                            if self.progress_tracker:
+                                self.progress_tracker.update_resource(skipped=1)
+                        else:
+                            stats["imported"] += 1
+                            import_succeeded += 1
+                            if (
+                                resource_type == "inventory_sources"
+                                and isinstance(result, dict)
+                                and result.get("id") is not None
+                            ):
+                                inventory_source_ids_for_sync.append(int(result["id"]))
+                            if self.progress_tracker:
+                                self.progress_tracker.update_resource(imported=1)
                     else:
                         # Check if it was a failure or just skipped (already imported)
                         if self.state.is_migrated(resource_type, source_id):
@@ -640,6 +658,18 @@ class MigrationCoordinator:
                             failed=stats["failed"],
                             skipped=stats["skipped"],
                         )
+
+                if resource_type == "inventory_sources" and inventory_source_ids_for_sync:
+                    logger.info(
+                        "inventory_sources_post_import_sync",
+                        count=len(inventory_source_ids_for_sync),
+                        message="Triggering inventory updates before later resource types",
+                    )
+                    await sync_inventory_sources_after_import(
+                        self.target_client,
+                        inventory_source_ids_for_sync,
+                        self.config.performance,
+                    )
 
                 # Report any import errors
                 if importer.import_errors:

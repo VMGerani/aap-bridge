@@ -31,6 +31,10 @@ from aap_migration.cli.utils import (
 )
 from aap_migration.migration.exporter import create_exporter
 from aap_migration.migration.importer import create_importer
+from aap_migration.migration.inventory_source_sync import (
+    collect_inventory_source_target_ids_for_sync,
+    sync_inventory_sources_after_import,
+)
 from aap_migration.migration.parallel_exporter import ParallelExportCoordinator
 from aap_migration.migration.state import ExportRunContext, MigrationState
 from aap_migration.reporting.live_progress import MigrationProgressDisplay
@@ -1624,6 +1628,7 @@ def import_cmd(
                             # Calculate skipped count (resources that already exist)
                             skipped_count = len(transformed_resources) - len(resources_to_import)
 
+                            results = None
                             if resources_to_import:
                                 # Create progress callback for live updates
                                 def update_progress(
@@ -1667,6 +1672,20 @@ def import_cmd(
                                     resource_type=rtype,
                                     total=len(transformed_resources),
                                 )
+
+                            if rtype == "inventory_sources" and results:
+                                sync_ids = collect_inventory_source_target_ids_for_sync(results)
+                                if sync_ids:
+                                    logger.info(
+                                        "inventory_sources_post_import_sync",
+                                        count=len(sync_ids),
+                                        message="Triggering inventory updates before constructed inventories",
+                                    )
+                                    await sync_inventory_sources_after_import(
+                                        ctx.target_client,
+                                        sync_ids,
+                                        ctx.config.performance,
+                                    )
 
                             # NOTE: SCM sync waiting has been removed from automatic flow.
                             # With two-phase import, users run phase1 (up to projects),

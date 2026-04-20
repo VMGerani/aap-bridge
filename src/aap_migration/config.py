@@ -269,6 +269,28 @@ class PerformanceConfig(BaseModel):
         le=60,
         description="Interval (seconds) between project sync status checks",
     )
+    inventory_source_update_job_timeout_seconds: int = Field(
+        default=3600,
+        ge=60,
+        le=7200,
+        description="Timeout (seconds) waiting for each inventory_update job after import",
+    )
+    inventory_source_update_poll_interval_seconds: float = Field(
+        default=3.0,
+        ge=1.0,
+        le=60.0,
+        description="Interval (seconds) between inventory_update status polls",
+    )
+    inventory_source_sync_max_concurrent: int = Field(
+        default=5,
+        ge=1,
+        le=30,
+        description="Maximum concurrent inventory source update jobs after import",
+    )
+    inventory_source_sync_fail_on_job_failure: bool = Field(
+        default=False,
+        description="If true, abort migration when an inventory_update finishes unsuccessfully",
+    )
     project_patch_batch_size: int = Field(
         default=100,
         ge=1,

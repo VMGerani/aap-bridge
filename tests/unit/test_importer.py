@@ -607,6 +607,30 @@ class TestJobTemplateImporter:
         assert "_needs_execution_environment" not in call_args
         assert "_custom_virtualenv_path" not in call_args
 
+    @pytest.mark.asyncio
+    async def test_import_job_template_posts_survey_spec(self, job_template_importer, mock_client):
+        """Survey body is POSTed to the survey_spec sub-resource after create."""
+        mock_client.create_resource.return_value = {"id": 500, "name": "Survey JT"}
+        mock_client.post = AsyncMock(return_value={})
+
+        templates = [
+            {
+                "_source_id": 1,
+                "name": "Survey JT",
+                "inventory": 1,
+                "project": 1,
+                "playbook": "site.yml",
+                "_survey_spec": {"name": "", "description": "", "spec": []},
+            }
+        ]
+
+        await job_template_importer.import_job_templates(templates)
+
+        mock_client.post.assert_called_once()
+        call_kw = mock_client.post.call_args[1]
+        assert call_kw["json_data"] == {"name": "", "description": "", "spec": []}
+        assert "job_templates/500/survey_spec/" in mock_client.post.call_args[0][0]
+
 
 class TestWorkflowImporter:
     """Tests for WorkflowImporter."""
@@ -654,6 +678,31 @@ class TestWorkflowImporter:
         # Nodes should not be in the create call
         call_args = mock_client.create_resource.call_args_list[0][1]["data"]
         assert "_workflow_job_template_nodes" not in call_args
+
+    @pytest.mark.asyncio
+    async def test_import_workflow_posts_survey_spec(self, workflow_importer, mock_client):
+        """Workflow survey body is POSTed after workflow create."""
+        mock_client.create_resource.return_value = {"id": 600, "name": "WF Survey"}
+        mock_client.post = AsyncMock(return_value={})
+
+        workflows = [
+            {
+                "_source_id": 1,
+                "name": "WF Survey",
+                "organization": 1,
+                "_survey_spec": {"name": "", "description": "", "spec": []},
+            }
+        ]
+
+        await workflow_importer.import_workflows(workflows)
+
+        mock_client.post.assert_called_once()
+        assert mock_client.post.call_args[1]["json_data"] == {
+            "name": "",
+            "description": "",
+            "spec": [],
+        }
+        assert "workflow_job_templates/600/survey_spec/" in mock_client.post.call_args[0][0]
 
 
 class TestCreateImporter:

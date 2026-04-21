@@ -14,10 +14,35 @@ from aap_migration.client.aap_source_client import AAPSourceClient
 from aap_migration.client.exceptions import APIError
 from aap_migration.config import PerformanceConfig, normalized_execution_environment_skip_names
 from aap_migration.migration.state import MigrationState
+from aap_migration.resources import get_endpoint
 from aap_migration.utils.inventory_fk import parse_inventory_id_from_api_value
 from aap_migration.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+async def _fetch_template_survey_spec(
+    client: AAPSourceClient,
+    resource_type: str,
+    template_id: int,
+) -> dict[str, Any]:
+    """GET ``{resource}/{id}/survey_spec/`` (empty ``{}`` when no survey questions).
+
+    Stored on export as ``_survey_spec`` and POSTed after template create on import.
+    """
+    base = get_endpoint(resource_type).rstrip("/")
+    endpoint = f"{base}/{template_id}/survey_spec/"
+    try:
+        resp = await client.get(endpoint)
+        return resp if isinstance(resp, dict) else {}
+    except Exception as e:
+        logger.warning(
+            "survey_spec_fetch_failed",
+            resource_type=resource_type,
+            template_id=template_id,
+            error=str(e),
+        )
+        return {}
 
 
 @runtime_checkable
@@ -1363,7 +1388,7 @@ class JobTemplateExporter(ResourceExporter):
             include_credentials: Whether to fetch credentials for each template
 
         Yields:
-            Job template dictionaries with optional '_credentials' field
+            Job template dictionaries with optional ``_credentials`` and ``_survey_spec``
         """
         logger.info("exporting_job_templates", include_credentials=include_credentials)
         async for template in self.export_resources(
@@ -1403,6 +1428,10 @@ class JobTemplateExporter(ResourceExporter):
                             error=str(e),
                         )
                         template["_credentials"] = []
+
+            template["_survey_spec"] = await _fetch_template_survey_spec(
+                self.client, "job_templates", template["id"]
+            )
 
             yield template
 
@@ -1453,6 +1482,10 @@ class JobTemplateExporter(ResourceExporter):
                         error=str(e),
                     )
                     template["_credentials"] = []
+
+            template["_survey_spec"] = await _fetch_template_survey_spec(
+                self.client, "job_templates", template["id"]
+            )
 
             yield template
 
@@ -1563,6 +1596,10 @@ class WorkflowExporter(ResourceExporter):
                     )
                     workflow["nodes"] = []
 
+            workflow["_survey_spec"] = await _fetch_template_survey_spec(
+                self.client, "workflow_job_templates", workflow["id"]
+            )
+
             yield workflow
 
     async def export_parallel(
@@ -1601,6 +1638,10 @@ class WorkflowExporter(ResourceExporter):
                     error=str(e),
                 )
                 workflow["nodes"] = []
+
+            workflow["_survey_spec"] = await _fetch_template_survey_spec(
+                self.client, "workflow_job_templates", workflow["id"]
+            )
 
             yield workflow
 

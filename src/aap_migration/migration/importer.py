@@ -343,6 +343,34 @@ class ResourceImporter:
 
             return None
 
+    async def _post_survey_spec_after_create(
+        self,
+        resource_type: str,
+        target_id: int,
+        survey_spec: dict[str, Any],
+        *,
+        template_name: str | None = None,
+    ) -> None:
+        """POST survey body to ``…/{id}/survey_spec/`` after the template exists."""
+        base = get_endpoint(resource_type).rstrip("/")
+        endpoint = f"{base}/{target_id}/survey_spec/"
+        try:
+            await self.client.post(endpoint, json_data=survey_spec)
+            logger.info(
+                "survey_spec_imported",
+                resource_type=resource_type,
+                target_id=target_id,
+                template_name=template_name,
+            )
+        except Exception as e:
+            logger.error(
+                "survey_spec_import_failed",
+                resource_type=resource_type,
+                target_id=target_id,
+                template_name=template_name,
+                error=str(e),
+            )
+
     async def _resolve_dependencies(
         self, resource_type: str, data: dict[str, Any]
     ) -> dict[str, Any]:
@@ -3141,6 +3169,7 @@ class JobTemplateImporter(ResourceImporter):
         resource_type: str,
         source_id: int | str,
         data: dict[str, Any],
+        resolve_dependencies: bool = True,
     ) -> dict[str, Any] | None:
         """Import a job template with credential association.
 
@@ -3155,22 +3184,33 @@ class JobTemplateImporter(ResourceImporter):
         Returns:
             Created/updated resource data, or None if failed
         """
+        survey_spec = data.pop("_survey_spec", None)
         # Extract credentials before import (they're not valid API fields)
         credentials = data.pop("credentials", [])
         template_name = data.get("name")
 
         # Call base import_resource
-        result = await super().import_resource(resource_type, source_id, data)
+        result = await super().import_resource(
+            resource_type, source_id, data, resolve_dependencies=resolve_dependencies
+        )
 
         # Associate credentials if import succeeded and we have credentials
-        if result and result.get("id") and credentials:
-            logger.info(
-                "associating_credentials_with_job_template",
-                job_template_id=result["id"],
-                template_name=template_name,
-                credential_count=len(credentials),
-            )
-            await self._associate_credentials(result["id"], credentials, template_name)
+        if result and result.get("id"):
+            if credentials:
+                logger.info(
+                    "associating_credentials_with_job_template",
+                    job_template_id=result["id"],
+                    template_name=template_name,
+                    credential_count=len(credentials),
+                )
+                await self._associate_credentials(result["id"], credentials, template_name)
+            if survey_spec is not None:
+                await self._post_survey_spec_after_create(
+                    "job_templates",
+                    result["id"],
+                    survey_spec,
+                    template_name=template_name,
+                )
 
         return result
 
@@ -3311,6 +3351,27 @@ class WorkflowImporter(ResourceImporter):
         "organization": "organizations",
         "inventory": "inventory",
     }
+
+    async def import_resource(
+        self,
+        resource_type: str,
+        source_id: int,
+        data: dict[str, Any],
+        resolve_dependencies: bool = True,
+    ) -> dict[str, Any] | None:
+        """Import a workflow; apply ``_survey_spec`` via POST after create."""
+        survey_spec = data.pop("_survey_spec", None)
+        result = await super().import_resource(
+            resource_type, source_id, data, resolve_dependencies=resolve_dependencies
+        )
+        if result and result.get("id") and survey_spec is not None:
+            await self._post_survey_spec_after_create(
+                "workflow_job_templates",
+                result["id"],
+                survey_spec,
+                template_name=result.get("name") or data.get("name"),
+            )
+        return result
 
     async def import_workflows(
         self,

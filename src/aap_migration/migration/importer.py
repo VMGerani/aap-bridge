@@ -53,39 +53,63 @@ async def _fetch_target_inventory_kind(
     return kind
 
 
+def _inventory_sources_list_has_items(resp: dict[str, Any]) -> bool:
+    """Interpret a list response from inventory_sources (count and/or results)."""
+    total = resp.get("count")
+    if total is not None:
+        return total > 0
+    return len(resp.get("results", [])) > 0
+
+
 async def _fetch_target_inventory_has_inventory_sources(
     client: AAPTargetClient,
     target_inventory_id: int,
     *,
     cache: dict[int, bool] | None = None,
 ) -> bool:
-    """True if the target inventory has at least one inventory source (sync-managed content)."""
+    """True if the target inventory has at least one inventory source (sync-managed content).
+
+    Uses ``GET inventories/<id>/inventory_sources/`` (same as the API ``related`` link) so the
+    result is scoped to that inventory. Some deployments mishandle the legacy query
+    ``inventory_sources/?inventory=<id>``, which can return an unfiltered list and make every
+    inventory look sync-managed — causing all hosts and groups to be skipped.
+    """
     if cache is not None and target_inventory_id in cache:
         return cache[target_inventory_id]
 
-    endpoint = get_endpoint("inventory_sources")
-    if not endpoint.endswith("/"):
-        endpoint = f"{endpoint}/"
+    inv_base = get_endpoint("inventory").rstrip("/")
+    nested_endpoint = f"{inv_base}/{target_inventory_id}/inventory_sources/"
+
+    resp: dict[str, Any] | None = None
     try:
-        resp = await client.get(
-            endpoint,
-            params={"inventory": target_inventory_id, "page_size": 1},
-        )
+        resp = await client.get(nested_endpoint, params={"page_size": 1})
     except Exception as e:
-        logger.warning(
-            "inventory_sources_lookup_failed",
+        logger.debug(
+            "inventory_sources_nested_lookup_failed_trying_flat",
             target_inventory_id=target_inventory_id,
             error=str(e),
         )
-        if cache is not None:
-            cache[target_inventory_id] = False
-        return False
 
-    total = resp.get("count")
-    if total is not None:
-        has_sources = total > 0
-    else:
-        has_sources = len(resp.get("results", [])) > 0
+    if resp is None:
+        endpoint = get_endpoint("inventory_sources")
+        if not endpoint.endswith("/"):
+            endpoint = f"{endpoint}/"
+        try:
+            resp = await client.get(
+                endpoint,
+                params={"inventory": target_inventory_id, "page_size": 1},
+            )
+        except Exception as e:
+            logger.warning(
+                "inventory_sources_lookup_failed",
+                target_inventory_id=target_inventory_id,
+                error=str(e),
+            )
+            if cache is not None:
+                cache[target_inventory_id] = False
+            return False
+
+    has_sources = _inventory_sources_list_has_items(resp)
     if cache is not None:
         cache[target_inventory_id] = has_sources
     return has_sources

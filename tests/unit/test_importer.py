@@ -21,6 +21,7 @@ from aap_migration.migration.importer import (
     ProjectImporter,
     ResourceImporter,
     WorkflowImporter,
+    _fetch_target_inventory_has_inventory_sources,
     create_importer,
 )
 from aap_migration.migration.state import MigrationState
@@ -65,6 +66,33 @@ def performance_config():
             "job_templates": 100,
         }
     )
+
+
+class TestFetchTargetInventoryHasInventorySources:
+    """Tests for inventory-scoped inventory_sources detection (hosts/groups skip policy)."""
+
+    @pytest.mark.asyncio
+    async def test_prefers_nested_inventory_sources_list(self):
+        client = MagicMock(spec=AAPTargetClient)
+        client.get = AsyncMock(return_value={"count": 0, "results": []})
+        result = await _fetch_target_inventory_has_inventory_sources(client, 42)
+        assert result is False
+        client.get.assert_awaited_once()
+        path = client.get.call_args[0][0]
+        assert "inventories/42/inventory_sources/" in path
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_flat_list_when_nested_fails(self):
+        client = MagicMock(spec=AAPTargetClient)
+        client.get = AsyncMock(
+            side_effect=[
+                ConnectionError("nested unavailable"),
+                {"count": 0, "results": []},
+            ]
+        )
+        result = await _fetch_target_inventory_has_inventory_sources(client, 3)
+        assert result is False
+        assert client.get.await_count == 2
 
 
 @pytest.fixture

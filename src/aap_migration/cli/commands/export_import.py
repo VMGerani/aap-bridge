@@ -1242,9 +1242,19 @@ def import_cmd(
         if not resources:
             return []
 
-        # Step 1: Clear target_ids to ensure we don't trust stale data
-        cleared_count = state.reset_target_ids(resource_type)
-        logger.info("cleared_target_ids", resource_type=resource_type, count=cleared_count)
+        # Step 1: Clear target_ids only for this batch's source rows so we do not wipe
+        # id_mappings for other resources of the same type imported in a prior step
+        # (e.g. static inventories vs. later smart_inventories both use resource_type inventory).
+        source_ids_for_reset = [
+            sid for r in resources if (sid := r.get("_source_id")) is not None
+        ]
+        cleared_count = state.reset_target_ids_for_source_ids(resource_type, source_ids_for_reset)
+        logger.info(
+            "cleared_target_ids",
+            resource_type=resource_type,
+            count=cleared_count,
+            source_id_count=len(source_ids_for_reset),
+        )
 
         # Step 2: Get identifier field from importer
         identifier_field = getattr(importer, "IDENTIFIER_FIELD", "name")

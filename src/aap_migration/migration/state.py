@@ -1412,6 +1412,49 @@ class MigrationState:
                 )
                 raise StateError(f"Failed to reset target IDs: {e}") from e
 
+    def reset_target_ids_for_source_ids(self, resource_type: str, source_ids: list[int]) -> int:
+        """Reset target_id to NULL only for the given source IDs.
+
+        Used by import batch precheck so clearing stale target IDs for one batch
+        (e.g. smart inventories) does not wipe mappings for other resources of the
+        same type already imported in an earlier step (e.g. static inventories).
+        """
+        if not source_ids:
+            return 0
+        resource_type = self._normalize(resource_type)
+        with self._lock:
+            try:
+                with get_session(self.database_url) as session:
+                    count = (
+                        session.query(IDMapping)
+                        .filter(
+                            IDMapping.resource_type == resource_type,
+                            IDMapping.source_id.in_(source_ids),
+                        )
+                        .update(
+                            {"target_id": None, "target_name": None},
+                            synchronize_session=False,
+                        )
+                    )
+                    session.commit()
+
+                    logger.info(
+                        "Reset target IDs for source id subset",
+                        resource_type=resource_type,
+                        count=count,
+                        source_id_count=len(source_ids),
+                    )
+
+                    return count
+
+            except Exception as e:
+                logger.error(
+                    "Failed to reset target IDs for source subset",
+                    resource_type=resource_type,
+                    error=str(e),
+                )
+                raise StateError(f"Failed to reset target IDs for source subset: {e}") from e
+
     def export_state(self, output_path: str) -> None:
         """
         Export migration state to JSON file.

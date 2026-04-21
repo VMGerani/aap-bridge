@@ -9,6 +9,24 @@ _INVENTORY_HREF_RE = re.compile(r"/inventories/(\d+)")
 _CREDENTIAL_HREF_RE = re.compile(r"/credentials/(\d+)")
 
 
+def normalize_input_inventories_to_source_ids(value: Any) -> list[int]:
+    """Coerce ``input_inventories`` from export/API to a list of inventory PKs.
+
+    Accepts a list of integers, dicts with ``id``, or inventory URL strings.
+    Order is preserved; duplicates are dropped.
+    """
+    if not value or not isinstance(value, (list, tuple)):
+        return []
+    seen: set[int] = set()
+    out: list[int] = []
+    for item in value:
+        pid = parse_inventory_id_from_api_value(item)
+        if pid is not None and pid not in seen:
+            seen.add(pid)
+            out.append(pid)
+    return out
+
+
 def parse_inventory_id_from_api_value(value: Any) -> int | None:
     """Return a source inventory PK from an API value (id, URL string, or summary dict)."""
     if value is None:

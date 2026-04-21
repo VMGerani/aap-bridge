@@ -1242,16 +1242,25 @@ def import_cmd(
         if not resources:
             return []
 
+        # Constructed inventories use API type ``constructed_inventories`` but share the same
+        # source inventory IDs and id_mappings row type as ``inventory`` (see ConstructedInventoryImporter).
+        mapping_resource_type = (
+            "inventory" if resource_type == "constructed_inventories" else resource_type
+        )
+
         # Step 1: Clear target_ids only for this batch's source rows so we do not wipe
         # id_mappings for other resources of the same type imported in a prior step
         # (e.g. static inventories vs. later smart_inventories both use resource_type inventory).
         source_ids_for_reset = [
             sid for r in resources if (sid := r.get("_source_id")) is not None
         ]
-        cleared_count = state.reset_target_ids_for_source_ids(resource_type, source_ids_for_reset)
+        cleared_count = state.reset_target_ids_for_source_ids(
+            mapping_resource_type, source_ids_for_reset
+        )
         logger.info(
             "cleared_target_ids",
             resource_type=resource_type,
+            mapping_resource_type=mapping_resource_type,
             count=cleared_count,
             source_id_count=len(source_ids_for_reset),
         )
@@ -1391,7 +1400,7 @@ def import_cmd(
                 existing = existing_by_identifier[lookup_key]
 
                 state.save_id_mapping(
-                    resource_type=resource_type,
+                    resource_type=mapping_resource_type,
                     source_id=source_id,
                     target_id=existing["id"],
                     source_name=identifier,
@@ -1727,6 +1736,19 @@ def import_cmd(
                                     "all_resources_exist",
                                     resource_type=rtype,
                                     total=len(transformed_resources),
+                                )
+
+                            # Constructed inventories: batch pre-check can skip every row (already on target),
+                            # so import_constructed_inventories never runs and input_inventories are never POSTed.
+                            # Always reconcile M2M from the full transformed list after pre-check updates mappings.
+                            if (
+                                rtype == "constructed_inventories"
+                                and not dry_run
+                                and transformed_resources
+                                and hasattr(importer, "sync_input_inventories_for_constructed_resources")
+                            ):
+                                await importer.sync_input_inventories_for_constructed_resources(
+                                    transformed_resources
                                 )
 
                             if rtype == "inventory_sources" and results:

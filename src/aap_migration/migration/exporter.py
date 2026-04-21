@@ -14,6 +14,7 @@ from aap_migration.client.aap_source_client import AAPSourceClient
 from aap_migration.client.exceptions import APIError
 from aap_migration.config import PerformanceConfig, normalized_execution_environment_skip_names
 from aap_migration.migration.state import MigrationState
+from aap_migration.utils.inventory_fk import parse_inventory_id_from_api_value
 from aap_migration.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -784,6 +785,29 @@ class InventoryExporter(ResourceExporter):
         )
         self._cache_loaded = True
 
+    async def _fetch_constructed_input_inventory_ids(self, constructed_inventory_id: int) -> list[int]:
+        """GET ``inventories/<id>/input_inventories/`` and return input inventory PKs in order.
+
+        The inventory list/detail response does not include a top-level ``input_inventories``
+        array—only ``related.input_inventories``—so we sub-fetch for migration.
+        """
+        endpoint = f"inventories/{constructed_inventory_id}/input_inventories/"
+        try:
+            rows = await self.client.get_paginated(endpoint, page_size=200)
+        except Exception as e:
+            logger.warning(
+                "constructed_inventory_input_inventories_fetch_failed",
+                constructed_inventory_id=constructed_inventory_id,
+                error=str(e),
+            )
+            return []
+        out: list[int] = []
+        for row in rows:
+            rid = parse_inventory_id_from_api_value(row)
+            if rid is not None:
+                out.append(rid)
+        return out
+
     async def export(
         self,
         filters: dict[str, Any] | None = None,
@@ -796,7 +820,9 @@ class InventoryExporter(ResourceExporter):
             include_sources: Whether to fetch inventory sources for each inventory
 
         Yields:
-            Inventory dictionaries with optional 'sources' field
+            Inventory dictionaries with optional ``sources`` field and, for
+            ``kind=constructed``, ``input_inventories`` (source inventory PKs from
+            the input_inventories sub-list endpoint).
         """
         logger.info("exporting_inventories", include_sources=include_sources)
 
@@ -823,6 +849,68 @@ class InventoryExporter(ResourceExporter):
             if include_sources:
                 inventory_id = inventory["id"]
                 inventory["sources"] = self._inventory_sources_cache.get(inventory_id, [])
+
+            # Constructed inventories: input inventory IDs live under related.input_inventories only;
+            # fetch sub-resource so export JSON matches what import needs (top-level input_inventories).
+            if (inventory.get("kind") or "") == "constructed":
+                cid = inventory["id"]
+                input_ids = await self._fetch_constructed_input_inventory_ids(cid)
+                if input_ids:
+                    inventory["input_inventories"] = input_ids
+                    logger.info(
+                        "constructed_inventory_input_inventories_attached",
+                        constructed_inventory_id=cid,
+                        input_inventory_source_ids=input_ids,
+                    )
+                else:
+                    logger.warning(
+                        "constructed_inventory_input_inventories_empty_after_fetch",
+                        constructed_inventory_id=cid,
+                        message="Sub-list returned no input inventory PKs; UI input list will not migrate",
+                    )
+
+            yield inventory
+
+    async def export_parallel(
+        self,
+        resource_type: str,
+        endpoint: str,
+        page_size: int = 200,
+        max_concurrent_pages: int = 5,
+        filters: dict[str, Any] | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Parallel fetch with the same enrichment as :meth:`export` (sources cache + constructed inputs).
+
+        The CLI uses this for inventory export; the base implementation only yields raw list rows.
+        """
+        await self._load_inventory_sources_cache()
+
+        async for inventory in super().export_parallel(
+            resource_type=resource_type,
+            endpoint=endpoint,
+            page_size=page_size,
+            max_concurrent_pages=max_concurrent_pages,
+            filters=filters,
+        ):
+            inventory_id = inventory["id"]
+            inventory["sources"] = self._inventory_sources_cache.get(inventory_id, [])
+
+            if (inventory.get("kind") or "") == "constructed":
+                cid = int(inventory["id"])
+                input_ids = await self._fetch_constructed_input_inventory_ids(cid)
+                if input_ids:
+                    inventory["input_inventories"] = input_ids
+                    logger.info(
+                        "constructed_inventory_input_inventories_attached",
+                        constructed_inventory_id=cid,
+                        input_inventory_source_ids=input_ids,
+                    )
+                else:
+                    logger.warning(
+                        "constructed_inventory_input_inventories_empty_after_fetch",
+                        constructed_inventory_id=cid,
+                        message="Sub-list returned no input inventory PKs; UI input list will not migrate",
+                    )
 
             yield inventory
 

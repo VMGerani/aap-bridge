@@ -18,6 +18,7 @@ from aap_migration.utils.idempotency import compare_resources
 from aap_migration.utils.inventory_fk import (
     ensure_credential_id_on_inventory_source,
     ensure_inventory_id_on_inventory_source,
+    normalize_input_inventories_to_source_ids,
     parse_credential_id_from_api_value,
     parse_inventory_id_from_api_value,
 )
@@ -3454,14 +3455,171 @@ class CredentialInputSourceImporter(ResourceImporter):
 class ConstructedInventoryImporter(ResourceImporter):
     """Importer for constructed inventory resources.
 
-    Constructed inventories are imported similarly to regular inventories
-    but POST to the constructed_inventories/ endpoint.
-    Saves id_mappings as 'inventories' type for downstream resolution.
+    Creates via ``POST constructed_inventories/``. Input inventories (UI) are
+    associated with ``POST inventories/<constructed>/input_inventories/`` and body
+    ``{"id": <pk>}`` per controller API. Export attaches ``input_inventories`` via
+    sub-fetch because list/detail only expose ``related.input_inventories``.
     """
 
     DEPENDENCIES = {
         "organization": "organizations",
     }
+
+    async def _associate_constructed_input_inventories(
+        self,
+        constructed_target_id: int,
+        input_inventory_target_ids: list[int],
+    ) -> None:
+        for input_tid in input_inventory_target_ids:
+            try:
+                await self.client.post(
+                    f"inventories/{constructed_target_id}/input_inventories/",
+                    json_data={"id": input_tid},
+                )
+            except Exception as e:
+                logger.warning(
+                    "constructed_inventory_input_inventory_associate_failed",
+                    constructed_inventory_id=constructed_target_id,
+                    input_inventory_id=input_tid,
+                    error=str(e),
+                )
+
+    async def _get_input_inventory_ids_on_target(self, constructed_target_id: int) -> set[int]:
+        """Return input inventory PKs already linked on the target constructed inventory."""
+        existing: set[int] = set()
+        page = 1
+        while True:
+            resp = await self.client.get(
+                f"inventories/{constructed_target_id}/input_inventories/",
+                params={"page": page, "page_size": 200},
+            )
+            for row in resp.get("results") or []:
+                rid = row.get("id")
+                if rid is not None:
+                    try:
+                        existing.add(int(rid))
+                    except (TypeError, ValueError):
+                        pass
+            if not resp.get("next"):
+                break
+            page += 1
+        return existing
+
+    async def sync_input_inventories_for_constructed_resources(
+        self,
+        resources: list[dict[str, Any]],
+    ) -> None:
+        """Ensure ``input_inventories`` M2M for every constructed row after batch pre-check.
+
+        Pre-check marks existing constructed inventories as skipped so
+        :meth:`import_constructed_inventories` never runs; this method still POSTs
+        associations using the full transformed resource list.
+        """
+        constructed_rows = [r for r in resources if (r.get("kind") or "") == "constructed"]
+        logger.info(
+            "constructed_inventory_input_inventory_sync_phase",
+            constructed_row_count=len(constructed_rows),
+        )
+        for raw in constructed_rows:
+            source_id = raw.get("_source_id")
+            if source_id is None:
+                source_id = raw.get("id")
+            if source_id is None:
+                continue
+            try:
+                sid = int(source_id)
+            except (TypeError, ValueError):
+                continue
+
+            target_constructed_id = self.state.get_mapped_id("inventory", sid)
+            if target_constructed_id is None:
+                target_constructed_id = self.state.get_mapped_id("constructed_inventories", sid)
+            if target_constructed_id is None:
+                target_constructed_id = await self._find_existing_constructed_inventory_id(
+                    raw.get("name")
+                )
+            if target_constructed_id is None:
+                logger.warning(
+                    "constructed_inventory_sync_no_target_id",
+                    source_id=sid,
+                    name=raw.get("name"),
+                )
+                continue
+
+            source_input_ids = normalize_input_inventories_to_source_ids(
+                raw.get("input_inventories")
+            )
+            if not source_input_ids:
+                logger.info(
+                    "constructed_inventory_sync_no_source_inputs",
+                    source_id=sid,
+                    constructed_name=raw.get("name"),
+                    message="Transformed row has no input_inventories; re-export with a bridge "
+                    "version that sub-fetches GET inventories/<id>/input_inventories/",
+                )
+                continue
+
+            target_input_ids: list[int] = []
+            for inv_sid in source_input_ids:
+                inv_tid = self.state.get_mapped_id("inventory", inv_sid)
+                if inv_tid is not None:
+                    target_input_ids.append(inv_tid)
+                elif await self.client.resource_exists("inventory", int(inv_sid)):
+                    target_input_ids.append(int(inv_sid))
+
+            if not target_input_ids:
+                logger.warning(
+                    "constructed_inventory_sync_no_mapped_inputs",
+                    source_id=sid,
+                    constructed_name=raw.get("name"),
+                    source_input_inventory_ids=source_input_ids,
+                )
+                continue
+
+            cid = int(target_constructed_id)
+            already = await self._get_input_inventory_ids_on_target(cid)
+            missing = [tid for tid in target_input_ids if tid not in already]
+            if not missing:
+                logger.info(
+                    "constructed_inventory_input_inventories_already_satisfied",
+                    constructed_target_id=cid,
+                    source_id=sid,
+                    input_inventory_target_ids=target_input_ids,
+                )
+                continue
+
+            await self._associate_constructed_input_inventories(cid, missing)
+            logger.info(
+                "constructed_inventory_input_inventories_synced",
+                constructed_target_id=cid,
+                source_id=sid,
+                added_input_inventory_ids=missing,
+            )
+
+    async def _find_existing_constructed_inventory_id(self, name: str | None) -> int | None:
+        """Resolve existing constructed inventory ID by name after 409 conflict."""
+        if not name:
+            return None
+        try:
+            resp = await self.client.get(
+                "constructed_inventories/",
+                params={"name": name, "page_size": 1},
+            )
+        except Exception as e:
+            logger.warning(
+                "constructed_inventory_existing_lookup_failed",
+                name=name,
+                error=str(e),
+            )
+            return None
+        rows = resp.get("results") or []
+        if not rows:
+            return None
+        rid = rows[0].get("id")
+        try:
+            return int(rid) if rid is not None else None
+        except (TypeError, ValueError):
+            return None
 
     async def import_constructed_inventories(
         self,
@@ -3479,11 +3637,47 @@ class ConstructedInventoryImporter(ResourceImporter):
         """
         results = []
 
-        for inventory in inventories:
-            source_id = inventory.pop("_source_id", inventory.get("id"))
+        for inv_raw in inventories:
+            source_id = inv_raw.get("_source_id") or inv_raw.get("id")
+            # Copy before popping: ``transformed_resources`` in the CLI reuses these dicts for
+            # :meth:`sync_input_inventories_for_constructed_resources`, which runs after import.
+            inventory = dict(inv_raw)
+            inventory.pop("_source_id", None)
 
             # Remove 'kind' field before POST - API sets it automatically
             inventory.pop("kind", None)
+
+            raw_inputs = inventory.pop("input_inventories", None)
+            source_input_ids = normalize_input_inventories_to_source_ids(raw_inputs)
+            target_input_ids: list[int] = []
+            for inv_sid in source_input_ids:
+                inv_tid = self.state.get_mapped_id("inventory", inv_sid)
+                if inv_tid is not None:
+                    target_input_ids.append(inv_tid)
+                else:
+                    # Fallback when source/target PKs happen to be the same.
+                    if await self.client.resource_exists("inventory", int(inv_sid)):
+                        target_input_ids.append(int(inv_sid))
+                        logger.info(
+                            "constructed_inventory_input_inventory_resolved_same_id",
+                            constructed_inventory_source_id=source_id,
+                            constructed_name=inventory.get("name"),
+                            inventory_id=int(inv_sid),
+                        )
+                    else:
+                        logger.warning(
+                            "constructed_inventory_input_inventory_unmapped",
+                            constructed_inventory_source_id=source_id,
+                            constructed_name=inventory.get("name"),
+                            input_inventory_source_id=inv_sid,
+                        )
+            if source_input_ids and not target_input_ids:
+                logger.error(
+                    "constructed_inventory_all_input_inventories_unmapped",
+                    constructed_inventory_source_id=source_id,
+                    constructed_name=inventory.get("name"),
+                    source_input_inventory_ids=source_input_ids,
+                )
 
             # Resolve organization
             org_source_id = inventory.get("organization")
@@ -3514,6 +3708,10 @@ class ConstructedInventoryImporter(ResourceImporter):
                 target_id = result.get("id")
 
                 if target_id:
+                    if target_input_ids:
+                        await self._associate_constructed_input_inventories(
+                            target_id, target_input_ids
+                        )
                     # Save as 'inventory' type for downstream resolution
                     self.state.create_or_update_mapping(
                         resource_type="inventory",
@@ -3531,6 +3729,26 @@ class ConstructedInventoryImporter(ResourceImporter):
                     source_id=source_id,
                     name=inventory.get("name"),
                 )
+                if target_input_ids:
+                    existing_target_id = await self._find_existing_constructed_inventory_id(
+                        inventory.get("name")
+                    )
+                    if existing_target_id:
+                        await self._associate_constructed_input_inventories(
+                            existing_target_id, target_input_ids
+                        )
+                        self.state.create_or_update_mapping(
+                            resource_type="inventory",
+                            source_id=source_id,
+                            target_id=existing_target_id,
+                            source_name=inventory.get("name"),
+                        )
+                        logger.info(
+                            "constructed_inventory_inputs_associated_on_existing",
+                            source_id=source_id,
+                            target_id=existing_target_id,
+                            input_inventory_target_ids=target_input_ids,
+                        )
             except Exception as e:
                 self.stats["error_count"] += 1
                 logger.error(

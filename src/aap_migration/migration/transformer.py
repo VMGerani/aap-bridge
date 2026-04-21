@@ -21,6 +21,7 @@ from aap_migration.config import MigrationConfig
 from aap_migration.schema.models import ComparisonResult
 from aap_migration.utils.inventory_fk import (
     ensure_inventory_id_on_inventory_source,
+    normalize_input_inventories_to_source_ids,
     parse_inventory_id_from_api_value,
 )
 from aap_migration.utils.logging import get_logger
@@ -1018,6 +1019,19 @@ class InventoryTransformer(DataTransformer):
         # Set inventory kind if not specified (default to empty string for regular inventory)
         if "kind" not in data:
             data["kind"] = ""
+
+        # Constructed: exporter attaches top-level input_inventories from GET .../input_inventories/;
+        # normalize so xformed data is a plain list of source PKs for import mapping.
+        if (data.get("kind") or "") == "constructed" and data.get("input_inventories") is not None:
+            normalized = normalize_input_inventories_to_source_ids(data.get("input_inventories"))
+            data["input_inventories"] = normalized
+            if normalized:
+                logger.debug(
+                    "constructed_inventory_input_inventories_normalized",
+                    source_id=source_id,
+                    source_name=data.get("name"),
+                    input_inventory_source_ids=normalized,
+                )
 
         # AAP 2.6 API requires variables field as JSON string, not dict
         if "variables" in data:

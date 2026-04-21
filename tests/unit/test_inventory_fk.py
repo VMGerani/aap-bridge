@@ -5,6 +5,7 @@ import pytest
 from aap_migration.utils.inventory_fk import (
     ensure_credential_id_on_inventory_source,
     ensure_inventory_id_on_inventory_source,
+    normalize_input_inventories_to_source_ids,
     parse_credential_id_from_api_value,
     parse_inventory_id_from_api_value,
 )
@@ -42,6 +43,12 @@ def test_ensure_prefers_top_level_int():
     data = {"inventory": 9}
     ensure_inventory_id_on_inventory_source(data)
     assert data["inventory"] == 9
+
+
+def test_normalize_input_inventories_mixed_and_dedupes():
+    assert normalize_input_inventories_to_source_ids(
+        [1, {"id": 2}, "/api/v2/inventories/3/", 1]
+    ) == [1, 2, 3]
 
 
 @pytest.mark.parametrize(

@@ -501,6 +501,7 @@ JOB_DELETABLE_TYPES = [
 ORGANIZATION_SCOPED_RESOURCES = {
     "projects",
     "inventory",
+    "constructed_inventories",
     "credentials",
     "job_templates",
     "workflow_job_templates",

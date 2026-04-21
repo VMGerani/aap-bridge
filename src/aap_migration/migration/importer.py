@@ -16,7 +16,9 @@ from aap_migration.migration.state import MigrationState
 from aap_migration.resources import get_endpoint, normalize_resource_type
 from aap_migration.utils.idempotency import compare_resources
 from aap_migration.utils.inventory_fk import (
+    ensure_credential_id_on_inventory_source,
     ensure_inventory_id_on_inventory_source,
+    parse_credential_id_from_api_value,
     parse_inventory_id_from_api_value,
 )
 from aap_migration.utils.logging import get_logger
@@ -219,7 +221,12 @@ class ResourceImporter:
             # EXCEPTION: Preserve None for credential ownership fields (organization/user/team)
             # Credentials require at least one ownership field, even if None
             ownership_fields = {"user", "team"}
-            data = {k: v for k, v in data.items() if v is not None or k in ownership_fields}
+            data = {
+                k: v
+                for k, v in data.items()
+                if (v is not None or k in ownership_fields)
+                and not (isinstance(k, str) and k.startswith("_"))
+            }
 
             # Create resource
             result = await self.client.create_resource(
@@ -349,6 +356,7 @@ class ResourceImporter:
         """
         if normalize_resource_type(resource_type) == "inventory_sources":
             ensure_inventory_id_on_inventory_source(data)
+            ensure_credential_id_on_inventory_source(data)
 
         resolved = dict(data)
         dependencies = self._get_dependencies(resource_type)
@@ -370,6 +378,14 @@ class ResourceImporter:
                     coerced = parse_inventory_id_from_api_value(dep_source_id)
                     if coerced is not None:
                         dep_source_id = coerced
+                elif dep_resource_type == "credentials":
+                    coerced = parse_credential_id_from_api_value(dep_source_id)
+                    if coerced is not None:
+                        dep_source_id = coerced
+                try:
+                    dep_source_id = int(dep_source_id)
+                except (TypeError, ValueError):
+                    pass
 
                 logger.debug(
                     "resolving_dependency_field",
@@ -393,6 +409,16 @@ class ResourceImporter:
                     target_id=target_id,
                     found=target_id is not None,
                 )
+
+                if (
+                    not target_id
+                    and normalize_resource_type(resource_type) == "inventory_sources"
+                    and field == "credential"
+                    and dep_resource_type == "credentials"
+                ):
+                    target_id = await self._resolve_inventory_source_credential_target(
+                        data, dep_source_id
+                    )
 
                 if target_id:
                     resolved[field] = target_id
@@ -433,6 +459,76 @@ class ResourceImporter:
                     resolved.pop(field, None)
 
         return resolved
+
+    async def _resolve_inventory_source_credential_target(
+        self,
+        data: dict[str, Any],
+        dep_source_id: int | Any,
+    ) -> int | None:
+        """Resolve credential FK when ``credentials:<source_id>`` is missing from id_mappings.
+
+        Cloud inventory sources require ``credential`` on create. Fallbacks:
+
+        1. ``get_mapped_id_by_name`` using ``_credential_lookup_name`` from transform
+           (matches :attr:`IDMapping.source_name` from credential import).
+        2. ``GET credentials/?name=…&organization__name=…`` on the target (pre-created creds).
+        """
+        name = data.get("_credential_lookup_name")
+        if not name:
+            logger.warning(
+                "inventory_source_credential_no_lookup_name",
+                inventory_source_name=data.get("name"),
+                dep_source_id=dep_source_id,
+                message="Re-transform inventory_sources so summary_fields.credential.name is captured",
+            )
+            return None
+
+        tid = self.state.get_mapped_id_by_name("credentials", name)
+        if tid:
+            logger.info(
+                "inventory_source_credential_resolved_by_mapping_source_name",
+                credential_name=name,
+                target_id=tid,
+            )
+            return tid
+
+        org_name = data.get("_inventory_source_organization_name")
+        try:
+            found = await self.client.find_resource_by_name(
+                "credentials",
+                name,
+                organization=org_name,
+            )
+        except Exception as e:
+            logger.warning(
+                "inventory_source_credential_target_lookup_failed",
+                credential_name=name,
+                organization=org_name,
+                error=str(e),
+            )
+            return None
+
+        if found:
+            tid = int(found["id"])
+            logger.info(
+                "inventory_source_credential_resolved_by_target_api",
+                credential_name=name,
+                target_id=tid,
+                organization=org_name,
+            )
+            try:
+                sid = int(dep_source_id)
+                self.state.save_id_mapping(
+                    resource_type="credentials",
+                    source_id=sid,
+                    target_id=tid,
+                    source_name=name,
+                    target_name=found.get("name"),
+                )
+            except (TypeError, ValueError):
+                pass
+            return tid
+        return None
 
     def _get_dependencies(self, resource_type: str) -> dict[str, str]:
         """Get dependency mapping for resource type.
@@ -1673,19 +1769,6 @@ class InventorySourceImporter(ResourceImporter):
         "credential": "credentials",
         "execution_environment": "execution_environments",
     }
-
-    async def import_resource(
-        self,
-        resource_type: str,
-        source_id: int,
-        data: dict[str, Any],
-        resolve_dependencies: bool = True,
-    ) -> dict[str, Any] | None:
-        """Ensure ``inventory`` is a numeric source PK (API may return only URLs)."""
-        ensure_inventory_id_on_inventory_source(data)
-        return await super().import_resource(
-            resource_type, source_id, data, resolve_dependencies=resolve_dependencies
-        )
 
     async def import_inventory_sources(
         self,

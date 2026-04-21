@@ -3,7 +3,9 @@
 import pytest
 
 from aap_migration.utils.inventory_fk import (
+    ensure_credential_id_on_inventory_source,
     ensure_inventory_id_on_inventory_source,
+    parse_credential_id_from_api_value,
     parse_inventory_id_from_api_value,
 )
 
@@ -40,3 +42,25 @@ def test_ensure_prefers_top_level_int():
     data = {"inventory": 9}
     ensure_inventory_id_on_inventory_source(data)
     assert data["inventory"] == 9
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (10, 10),
+        ("/api/v2/credentials/10/", 10),
+        ("/api/controller/v2/credentials/10/", 10),
+        ({"id": 10}, 10),
+        ({"url": "https://x/api/v2/credentials/12/"}, 12),
+    ],
+)
+def test_parse_credential_id_from_api_value(value, expected):
+    assert parse_credential_id_from_api_value(value) == expected
+
+
+def test_ensure_credential_fills_from_related():
+    data = {
+        "related": {"credential": "/api/controller/v2/credentials/10/"},
+    }
+    ensure_credential_id_on_inventory_source(data)
+    assert data["credential"] == 10

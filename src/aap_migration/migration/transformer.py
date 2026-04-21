@@ -868,11 +868,21 @@ class DataTransformer:
                     project_id=proj_info["id"],
                 )
 
+        # Organization name (for target API lookup when credential ID mapping is missing)
+        if "summary_fields" in data and "organization" in data["summary_fields"]:
+            org_info = data["summary_fields"]["organization"]
+            if isinstance(org_info, dict) and org_info.get("name"):
+                data["_inventory_source_organization_name"] = org_info["name"]
+
         # Extract credential ID (optional)
         if "summary_fields" in data and "credential" in data["summary_fields"]:
             cred_info = data["summary_fields"]["credential"]
             if isinstance(cred_info, dict) and "id" in cred_info:
                 data["credential"] = cred_info["id"]
+                if cred_info.get("name"):
+                    # Used at import when id_mappings has no credentials:<source_id> row
+                    # (e.g. credential pre-created on target only — resolve by name + org).
+                    data["_credential_lookup_name"] = cred_info["name"]
                 logger.debug(
                     "extracted_credential_from_summary",
                     resource_type="inventory_sources",
@@ -1879,39 +1889,13 @@ class InventorySourceTransformer(DataTransformer):
     ) -> dict[str, Any]:
         """Apply inventory source-specific transformations.
 
-        Args:
-            data: Inventory source data
-            resource_type: Resource type (should be 'inventory_sources')
-
-        Returns:
-            Transformed inventory source data
+        Delegates to :meth:`DataTransformer._transform_inventory_sources` so
+        optional FKs (``credential``, ``execution_environment``, ``source_project``)
+        are copied out of ``summary_fields`` before read-only fields are stripped.
+        The previous override only handled inventory/source_project and dropped cloud
+        credentials required for Satellite and other ``source`` types.
         """
-        ensure_inventory_id_on_inventory_source(data)
-        source_id = data.get("_source_id") or data.get("id")
-
-        # Extract inventory from summary when top-level is missing or null (see _transform_inventory_sources)
-        if "summary_fields" in data and "inventory" in data["summary_fields"]:
-            if parse_inventory_id_from_api_value(data.get("inventory")) is None:
-                inv_info = data["summary_fields"]["inventory"]
-                pid = parse_inventory_id_from_api_value(inv_info)
-                if pid is not None:
-                    data["inventory"] = pid
-                    logger.debug(
-                        "extracted_inventory_from_summary",
-                        resource_type="inventory_sources",
-                        source_id=source_id,
-                        source_name=data.get("name"),
-                        inventory_id=pid,
-                    )
-
-        # Extract source_project ID from summary_fields
-        if "source_project" not in data and "summary_fields" in data:
-            if "source_project" in data["summary_fields"]:
-                proj_info = data["summary_fields"]["source_project"]
-                if isinstance(proj_info, dict) and "id" in proj_info:
-                    data["source_project"] = proj_info["id"]
-
-        return data
+        return self._transform_inventory_sources(data)
 
 
 class ScheduleTransformer(DataTransformer):

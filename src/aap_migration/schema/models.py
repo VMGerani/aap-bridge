@@ -203,3 +203,94 @@ class ComparisonResult:
                 1 for diff in self.field_diffs if diff.severity == Severity.HIGH
             ),
         }
+
+    @classmethod
+    def from_transformation_dict(
+        cls,
+        resource_type: str,
+        data: dict[str, Any],
+        source_schema: dict[str, Any] | None = None,
+        target_schema: dict[str, Any] | None = None,
+    ) -> "ComparisonResult":
+        """Build a ComparisonResult from a legacy transformation summary dict.
+
+        Adapts the summary-shape dict emitted by
+        ``aap_migration.prep.schema_comparison.compare_schemas`` (keys like
+        ``fields_removed``, ``fields_added``, ``fields_type_changed``,
+        ``fields_required_changed``) into structured FieldDiff objects so the
+        result can be consumed by schema.persistence.save_schemas.
+        """
+        field_diffs: list[FieldDiff] = []
+
+        for name in data.get("fields_removed") or []:
+            field_diffs.append(
+                FieldDiff(
+                    field_name=name,
+                    change_type=ChangeType.FIELD_REMOVED,
+                    severity=Severity.MEDIUM,
+                    description=f"Field '{name}' removed in target",
+                )
+            )
+
+        fields_added = data.get("fields_added") or []
+        if isinstance(fields_added, dict):
+            fields_added = list(fields_added.keys())
+        new_required_defaults = data.get("new_required_defaults") or {}
+        for name in fields_added:
+            is_required = name in new_required_defaults
+            has_default = new_required_defaults.get(name) is not None
+            if is_required and not has_default:
+                severity = Severity.HIGH
+            elif is_required:
+                severity = Severity.LOW
+            else:
+                severity = Severity.LOW
+            target_value: dict[str, Any] = {"required": is_required}
+            if name in new_required_defaults:
+                target_value["default"] = new_required_defaults[name]
+            field_diffs.append(
+                FieldDiff(
+                    field_name=name,
+                    change_type=ChangeType.FIELD_ADDED,
+                    severity=severity,
+                    target_value=target_value,
+                    description=f"Field '{name}' added in target",
+                )
+            )
+
+        for name, info in (data.get("fields_type_changed") or {}).items():
+            field_diffs.append(
+                FieldDiff(
+                    field_name=name,
+                    change_type=ChangeType.TYPE_CHANGED,
+                    severity=Severity.HIGH,
+                    source_value=info.get("source_type"),
+                    target_value=info.get("target_type"),
+                    description=(
+                        f"Type changed: {info.get('source_type')} -> {info.get('target_type')}"
+                    ),
+                )
+            )
+
+        for name, info in (data.get("fields_required_changed") or {}).items():
+            target_required = info.get("target_required")
+            severity = Severity.HIGH if target_required else Severity.LOW
+            field_diffs.append(
+                FieldDiff(
+                    field_name=name,
+                    change_type=ChangeType.REQUIRED_CHANGED,
+                    severity=severity,
+                    source_value=info.get("source_required"),
+                    target_value=target_required,
+                    description=(
+                        f"Required changed: {info.get('source_required')} -> {target_required}"
+                    ),
+                )
+            )
+
+        return cls(
+            resource_type=resource_type,
+            source_schema=source_schema or {},
+            target_schema=target_schema or {},
+            field_diffs=field_diffs,
+        )

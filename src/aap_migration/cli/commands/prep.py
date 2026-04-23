@@ -231,19 +231,18 @@ def prep(ctx: MigrationContext, output_dir: Path, force: bool) -> None:
 
             # Use persistence module to save all schemas and comparison (REQ-002)
             # Build ComparisonResult objects (prep's transformation dict is not the same shape)
-            from aap_migration.schema.comparator import SchemaComparator
+            from aap_migration.schema.models import ComparisonResult
             from aap_migration.schema.persistence import save_schemas
 
-            comparator = SchemaComparator()
-            source_schemas = source_schema["schemas"]
-            target_schemas = target_schema["schemas"]
-            comparisons = {}
-            for rtype in comparison["transformations"]:
-                src_fields = source_schemas.get(rtype, {}).get("fields") or {}
-                tgt_fields = target_schemas.get(rtype, {}).get("fields") or {}
-                if src_fields and not tgt_fields:
-                    tgt_fields = src_fields
-                comparisons[rtype] = comparator.compare_schemas(rtype, src_fields, tgt_fields)
+            comparisons = {
+                rtype: ComparisonResult.from_transformation_dict(
+                    resource_type=rtype,
+                    data=data,
+                    source_schema=source_schema["schemas"].get(rtype, {}),
+                    target_schema=target_schema["schemas"].get(rtype, {}),
+                )
+                for rtype, data in comparison["transformations"].items()
+            }
 
             await save_schemas(
                 source_schemas=source_schema["schemas"],

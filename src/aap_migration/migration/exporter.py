@@ -2012,12 +2012,15 @@ class UserExporter(ResourceExporter):
     async def _process_resource(
         self, resource: dict[str, Any], resource_type: str
     ) -> dict[str, Any] | None:
-        """Attach team membership source IDs to each user export row.
+        """Attach team memberships and direct role grants to each user export row.
 
-        Team memberships are represented via related endpoint calls, not inline user
-        fields. Persist these source team IDs so import can re-associate users to
-        teams on the target using ``teams/<id>/users/``.
+        Both are represented via related-endpoint calls, not inline user fields.
+        - ``_team_source_ids``: used by import to re-associate users to teams.
+        - ``_user_role_grants``: used by post-import pass to apply classic RBAC
+          role grants (e.g. Execute on Job Template) via ``POST users/{id}/roles/``.
         """
+        from aap_migration.migration.team_role_grants import parse_user_role_from_api
+
         processed = await super()._process_resource(resource, resource_type)
         if not processed:
             return None
@@ -2026,6 +2029,7 @@ class UserExporter(ResourceExporter):
         if not source_user_id:
             return processed
 
+        # Team memberships
         try:
             teams = await self.client.get_paginated(
                 f"users/{source_user_id}/teams/",
@@ -2035,13 +2039,31 @@ class UserExporter(ResourceExporter):
                 int(team["id"]) for team in teams if team.get("id") is not None
             ]
         except Exception as e:
-            # Non-fatal: user export should continue even if team relation lookup fails.
             logger.warning(
                 "user_team_memberships_fetch_failed",
                 source_user_id=source_user_id,
                 error=str(e),
             )
             processed["_team_source_ids"] = []
+
+        # Direct role grants on other resources (classic RBAC)
+        grants: list[dict[str, str | int]] = []
+        try:
+            roles = await self.client.get_paginated(
+                f"users/{source_user_id}/roles/",
+                page_size=self.performance_config.batch_sizes.get("users", 200),
+            )
+            for role in roles:
+                parsed = parse_user_role_from_api(role)
+                if parsed:
+                    grants.append(parsed)
+        except Exception as e:
+            logger.warning(
+                "user_roles_fetch_failed",
+                source_user_id=source_user_id,
+                error=str(e),
+            )
+        processed["_user_role_grants"] = grants
 
         return processed
 

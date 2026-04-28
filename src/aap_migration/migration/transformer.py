@@ -2255,6 +2255,32 @@ class RoleDefinitionTransformer(DataTransformer):
         return data
 
 
+class RoleAssignmentTransformer(DataTransformer):
+    """Transformer for role_user_assignments and role_team_assignments.
+
+    Extracts the role definition name from summary_fields before it is
+    stripped, so the importer can resolve managed role definitions (which
+    are not exported and therefore have no state ID mapping) by name
+    against the target API.
+    """
+
+    DEPENDENCIES: dict[str, str] = {}
+    REQUIRED_DEPENDENCIES: set[str] = set()
+
+    def _apply_specific_transformations(
+        self, data: dict[str, Any], resource_type: str
+    ) -> dict[str, Any]:
+        """Extract role_definition_name and content_object_name from summary_fields before removal."""
+        summary = data.get("summary_fields", {})
+        role_def_summary = summary.get("role_definition", {})
+        if role_def_summary.get("name"):
+            data["role_definition_name"] = role_def_summary["name"]
+        content_obj = summary.get("content_object", {})
+        if content_obj and content_obj.get("name"):
+            data["content_object_name"] = content_obj["name"]
+        return data
+
+
 # =============================================================================
 # Transformer Registry and Metadata
 # =============================================================================
@@ -2303,8 +2329,8 @@ TRANSFORMER_CLASSES: dict[str, type[DataTransformer]] = {
     "jobs": JobsTransformer,
     "constructed_inventories": InventoryTransformer,
     "role_definitions": RoleDefinitionTransformer,
-    "role_user_assignments": DataTransformer,
-    "role_team_assignments": DataTransformer,
+    "role_user_assignments": RoleAssignmentTransformer,
+    "role_team_assignments": RoleAssignmentTransformer,
 }
 
 

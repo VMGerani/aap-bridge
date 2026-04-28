@@ -4534,11 +4534,130 @@ class RoleDefinitionImporter(ResourceImporter):
         return await self._import_parallel("role_definitions", definitions, progress_callback)
 
 
+# Maps AAP content_type labels to the resource_type keys used in state ID mappings.
+_CONTENT_TYPE_TO_RESOURCE_TYPE: dict[str, str] = {
+    "awx.credential": "credentials",
+    "awx.executionenvironment": "execution_environments",
+    "awx.instancegroup": "instance_groups",
+    "awx.inventory": "inventory",
+    "awx.jobtemplate": "job_templates",
+    "awx.notificationtemplate": "notification_templates",
+    "awx.organization": "organizations",
+    "awx.project": "projects",
+    "awx.team": "teams",
+    "awx.workflowjobtemplate": "workflow_job_templates",
+}
+
+
+async def _resolve_content_object_target_id(
+    state: Any,
+    client: Any,
+    resource_type: str,
+    object_source_id: int,
+    content_object_name: str | None,
+    source_id: int,
+) -> int | None:
+    """Resolve the target resource ID from state mapping or by name lookup.
+
+    Resources that are not migrated (e.g. instance_groups) won't have a state
+    mapping.  If a content_object_name is available, fall back to a live
+    GET-by-name on the target, assuming the resource already exists there
+    (documented prerequisite for such resource types).
+    """
+    target_id = state.get_mapped_id(resource_type, object_source_id)
+    if target_id:
+        return target_id
+
+    if not content_object_name:
+        return None
+
+    try:
+        endpoint = f"{resource_type}/"
+        results = await client.get(endpoint, params={"name": content_object_name})
+        resources = results.get("results", [])
+        if resources:
+            logger.info(
+                "role_assignment_resource_resolved_by_name",
+                resource_type=resource_type,
+                name=content_object_name,
+                target_id=resources[0]["id"],
+                source_id=source_id,
+            )
+            return resources[0]["id"]
+    except Exception as e:
+        logger.error(
+            "role_assignment_resource_name_lookup_failed",
+            resource_type=resource_type,
+            name=content_object_name,
+            error=str(e),
+        )
+
+    logger.warning(
+        "role_assignment_resource_not_found_on_target",
+        resource_type=resource_type,
+        name=content_object_name,
+        source_id=source_id,
+    )
+    return None
+
+
+async def _resolve_role_definition_target_id(
+    state: Any,
+    client: Any,
+    role_def_source_id: int,
+    role_def_name: str | None,
+    source_id: int,
+) -> int | None:
+    """Resolve the target role_definition ID from state mapping or by name lookup.
+
+    Custom role definitions are mapped via state (populated during the
+    role_definitions import phase).  Managed (built-in) role definitions are
+    never exported/created, so they won't be in the state; fall back to a
+    live GET by name on the target API.
+    """
+    target_id = state.get_mapped_id("role_definitions", role_def_source_id)
+    if target_id:
+        return target_id
+
+    if not role_def_name:
+        logger.warning(
+            "role_definition_unresolvable",
+            role_def_source_id=role_def_source_id,
+            source_id=source_id,
+        )
+        return None
+
+    try:
+        results = await client.get("role_definitions/", params={"name": role_def_name})
+        resources = results.get("results", [])
+        if resources:
+            return resources[0]["id"]
+    except Exception as e:
+        logger.error(
+            "role_definition_name_lookup_failed",
+            role_def_name=role_def_name,
+            error=str(e),
+        )
+
+    logger.warning(
+        "role_definition_not_found_on_target",
+        role_def_name=role_def_name,
+        role_def_source_id=role_def_source_id,
+        source_id=source_id,
+    )
+    return None
+
+
 class RoleUserAssignmentImporter(ResourceImporter):
     """Importer for user role assignments (AAP 2.6 RBAC).
 
-    Resolves role_key to role_definition via mappings, resolves resource/user IDs
-    via id_mappings, and POSTs to role_user_assignments/.
+    Reads the direct AAP 2.6 assignment format (role_definition source ID,
+    content_type, object_id, user source ID) produced by the transformer and
+    POSTs to role_user_assignments/ on the target.
+
+    Managed (built-in) role definitions that were not exported are resolved by
+    name against the target API using the role_definition_name field injected by
+    RoleAssignmentTransformer.
     """
 
     DEPENDENCIES = {}
@@ -4548,97 +4667,74 @@ class RoleUserAssignmentImporter(ResourceImporter):
         assignments: list[dict[str, Any]],
         progress_callback: Callable[[int, int, int], None] | None = None,
     ) -> list[dict[str, Any]]:
-        """Import user role assignments.
-
-        Args:
-            assignments: List of normalized assignment records
-            progress_callback: Optional callback for progress updates
-
-        Returns:
-            List of successfully created assignments
-        """
-        results = []
-        role_name_mappings = self.resource_mappings.get("role_name_mappings", {})
+        """Import user role assignments."""
+        results: list[dict[str, Any]] = []
 
         for assignment in assignments:
             source_id = assignment.pop("_source_id", assignment.get("id"))
-            resource_type = assignment.get("resource_type")
-            resource_source_id = assignment.get("resource_source_id")
-            role_key = assignment.get("role_key")
-            principal_source_id = assignment.get("principal_source_id")
+            role_def_source_id = assignment.get("role_definition")
+            role_def_name = assignment.get("role_definition_name")
+            content_type = assignment.get("content_type")
+            object_source_id = assignment.get("object_id")
+            content_object_name = assignment.get("content_object_name")
+            user_source_id = assignment.get("user")
 
-            # Resolve role_key to role_definition name
-            mapping_key = f"{resource_type}.{role_key}"
-            role_def_name = role_name_mappings.get(mapping_key)
-            if not role_def_name:
-                logger.warning(
-                    "role_mapping_not_found",
-                    mapping_key=mapping_key,
-                    source_id=source_id,
-                )
+            def _skip() -> None:
                 self.stats["skipped_count"] += 1
+                results.append({"_skipped": True})
                 if progress_callback:
                     progress_callback(
                         self.stats["imported_count"],
                         self.stats["error_count"],
                         self.stats["skipped_count"],
                     )
+
+            # Resolve role_definition
+            target_role_def_id = await _resolve_role_definition_target_id(
+                self.state, self.client, role_def_source_id, role_def_name, source_id
+            )
+            if not target_role_def_id:
+                _skip()
                 continue
 
-            # Resolve role_definition ID from name
-            role_def_mapping = self.state.get_mapped_id_by_name("role_definitions", role_def_name)
-            if not role_def_mapping:
+            # Resolve resource
+            resource_type = _CONTENT_TYPE_TO_RESOURCE_TYPE.get(content_type)
+            if not resource_type:
                 logger.warning(
-                    "role_definition_not_mapped",
-                    role_def_name=role_def_name,
+                    "role_assignment_unknown_content_type",
+                    content_type=content_type,
                     source_id=source_id,
                 )
-                self.stats["skipped_count"] += 1
-                if progress_callback:
-                    progress_callback(
-                        self.stats["imported_count"],
-                        self.stats["error_count"],
-                        self.stats["skipped_count"],
-                    )
+                _skip()
                 continue
 
-            # Resolve resource ID
-            target_resource_id = self.state.get_mapped_id(resource_type, resource_source_id)
+            target_resource_id = await _resolve_content_object_target_id(
+                self.state, self.client, resource_type, int(object_source_id),
+                content_object_name, source_id,
+            )
             if not target_resource_id:
                 logger.warning(
                     "role_assignment_resource_not_found",
                     resource_type=resource_type,
-                    source_id=resource_source_id,
+                    source_id=object_source_id,
                 )
-                self.stats["skipped_count"] += 1
-                if progress_callback:
-                    progress_callback(
-                        self.stats["imported_count"],
-                        self.stats["error_count"],
-                        self.stats["skipped_count"],
-                    )
+                _skip()
                 continue
 
-            # Resolve user ID
-            target_user_id = self.state.get_mapped_id("users", principal_source_id)
+            # Resolve user
+            target_user_id = self.state.get_mapped_id("users", user_source_id)
             if not target_user_id:
                 logger.warning(
                     "role_assignment_user_not_found",
-                    source_user_id=principal_source_id,
+                    source_user_id=user_source_id,
                 )
-                self.stats["skipped_count"] += 1
-                if progress_callback:
-                    progress_callback(
-                        self.stats["imported_count"],
-                        self.stats["error_count"],
-                        self.stats["skipped_count"],
-                    )
+                _skip()
                 continue
 
             try:
                 payload = {
-                    "role_definition": role_def_mapping,
-                    "object_id": target_resource_id,
+                    "role_definition": target_role_def_id,
+                    "object_id": str(target_resource_id),
                     "user": target_user_id,
                 }
                 await self.client.post("role_user_assignments/", json_data=payload)
@@ -4646,12 +4742,8 @@ class RoleUserAssignmentImporter(ResourceImporter):
                 results.append(payload)
 
             except ConflictError:
-                # Assignment already exists - that's fine
-                self.stats["skipped_count"] += 1
-                logger.debug(
-                    "role_user_assignment_exists",
-                    source_id=source_id,
-                )
+                logger.debug("role_user_assignment_exists", source_id=source_id)
+                _skip()
             except Exception as e:
                 self.stats["error_count"] += 1
                 logger.error(
@@ -4673,7 +4765,7 @@ class RoleUserAssignmentImporter(ResourceImporter):
 class RoleTeamAssignmentImporter(ResourceImporter):
     """Importer for team role assignments (AAP 2.6 RBAC).
 
-    Same pattern as RoleUserAssignmentImporter but for teams.
+    Same pattern as RoleUserAssignmentImporter but resolves team instead of user.
     """
 
     DEPENDENCIES = {}
@@ -4683,97 +4775,74 @@ class RoleTeamAssignmentImporter(ResourceImporter):
         assignments: list[dict[str, Any]],
         progress_callback: Callable[[int, int, int], None] | None = None,
     ) -> list[dict[str, Any]]:
-        """Import team role assignments.
-
-        Args:
-            assignments: List of normalized assignment records
-            progress_callback: Optional callback for progress updates
-
-        Returns:
-            List of successfully created assignments
-        """
-        results = []
-        role_name_mappings = self.resource_mappings.get("role_name_mappings", {})
+        """Import team role assignments."""
+        results: list[dict[str, Any]] = []
 
         for assignment in assignments:
             source_id = assignment.pop("_source_id", assignment.get("id"))
-            resource_type = assignment.get("resource_type")
-            resource_source_id = assignment.get("resource_source_id")
-            role_key = assignment.get("role_key")
-            principal_source_id = assignment.get("principal_source_id")
+            role_def_source_id = assignment.get("role_definition")
+            role_def_name = assignment.get("role_definition_name")
+            content_type = assignment.get("content_type")
+            object_source_id = assignment.get("object_id")
+            content_object_name = assignment.get("content_object_name")
+            team_source_id = assignment.get("team")
 
-            # Resolve role_key to role_definition name
-            mapping_key = f"{resource_type}.{role_key}"
-            role_def_name = role_name_mappings.get(mapping_key)
-            if not role_def_name:
-                logger.warning(
-                    "role_mapping_not_found",
-                    mapping_key=mapping_key,
-                    source_id=source_id,
-                )
+            def _skip() -> None:
                 self.stats["skipped_count"] += 1
+                results.append({"_skipped": True})
                 if progress_callback:
                     progress_callback(
                         self.stats["imported_count"],
                         self.stats["error_count"],
                         self.stats["skipped_count"],
                     )
+
+            # Resolve role_definition
+            target_role_def_id = await _resolve_role_definition_target_id(
+                self.state, self.client, role_def_source_id, role_def_name, source_id
+            )
+            if not target_role_def_id:
+                _skip()
                 continue
 
-            # Resolve role_definition ID from name
-            role_def_mapping = self.state.get_mapped_id_by_name("role_definitions", role_def_name)
-            if not role_def_mapping:
+            # Resolve resource
+            resource_type = _CONTENT_TYPE_TO_RESOURCE_TYPE.get(content_type)
+            if not resource_type:
                 logger.warning(
-                    "role_definition_not_mapped",
-                    role_def_name=role_def_name,
+                    "role_assignment_unknown_content_type",
+                    content_type=content_type,
                     source_id=source_id,
                 )
-                self.stats["skipped_count"] += 1
-                if progress_callback:
-                    progress_callback(
-                        self.stats["imported_count"],
-                        self.stats["error_count"],
-                        self.stats["skipped_count"],
-                    )
+                _skip()
                 continue
 
-            # Resolve resource ID
-            target_resource_id = self.state.get_mapped_id(resource_type, resource_source_id)
+            target_resource_id = await _resolve_content_object_target_id(
+                self.state, self.client, resource_type, int(object_source_id),
+                content_object_name, source_id,
+            )
             if not target_resource_id:
                 logger.warning(
                     "role_assignment_resource_not_found",
                     resource_type=resource_type,
-                    source_id=resource_source_id,
+                    source_id=object_source_id,
                 )
-                self.stats["skipped_count"] += 1
-                if progress_callback:
-                    progress_callback(
-                        self.stats["imported_count"],
-                        self.stats["error_count"],
-                        self.stats["skipped_count"],
-                    )
+                _skip()
                 continue
 
-            # Resolve team ID
-            target_team_id = self.state.get_mapped_id("teams", principal_source_id)
+            # Resolve team
+            target_team_id = self.state.get_mapped_id("teams", team_source_id)
             if not target_team_id:
                 logger.warning(
                     "role_assignment_team_not_found",
-                    source_team_id=principal_source_id,
+                    source_team_id=team_source_id,
                 )
-                self.stats["skipped_count"] += 1
-                if progress_callback:
-                    progress_callback(
-                        self.stats["imported_count"],
-                        self.stats["error_count"],
-                        self.stats["skipped_count"],
-                    )
+                _skip()
                 continue
 
             try:
                 payload = {
-                    "role_definition": role_def_mapping,
-                    "object_id": target_resource_id,
+                    "role_definition": target_role_def_id,
+                    "object_id": str(target_resource_id),
                     "team": target_team_id,
                 }
                 await self.client.post("role_team_assignments/", json_data=payload)
@@ -4781,11 +4850,8 @@ class RoleTeamAssignmentImporter(ResourceImporter):
                 results.append(payload)
 
             except ConflictError:
-                self.stats["skipped_count"] += 1
-                logger.debug(
-                    "role_team_assignment_exists",
-                    source_id=source_id,
-                )
+                logger.debug("role_team_assignment_exists", source_id=source_id)
+                _skip()
             except Exception as e:
                 self.stats["error_count"] += 1
                 logger.error(

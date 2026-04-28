@@ -151,6 +151,10 @@ def prep(ctx: MigrationContext, output_dir: Path, force: bool) -> None:
                         echo_success(
                             f"Migration path {source_version} → {target_version}: fully supported"
                         )
+                        if version_path.known_exceptions:
+                            echo_info("  Known exceptions:")
+                            for exc in version_path.known_exceptions:
+                                click.echo(f"    - {exc}")
 
             # ============================================
             # 2. DISCOVER ENDPOINTS (combined output)

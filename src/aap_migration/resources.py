@@ -47,24 +47,24 @@ COMPATIBILITY_MATRIX: list[VersionPath] = [
         notes="Primary migration path. Fully tested.",
         known_exceptions=[
             "Encrypted credentials cannot be extracted from source API",
-            "Custom credential types require manual pre-creation",
+            "Instance groups referenced by RBAC assignments must exist on the target with the same name",
         ],
     ),
     VersionPath(
         source="2.4",
         target="2.6",
-        status="partial",
-        notes="Core resource families tested. Some 2.4-specific features may require manual steps.",
+        status="supported",
+        notes="Primary migration path. Fully tested.",
         known_exceptions=[
             "Encrypted credentials cannot be extracted from source API",
-            "2.4-specific inventory plugin configurations may need adjustment",
+            "Instance groups referenced by RBAC assignments must exist on the target with the same name",
         ],
     ),
     VersionPath(
         source="2.5",
         target="2.6",
         status="supported",
-        notes="Fully supported. RBAC role definitions and assignments are migrated.",
+        notes="Primary migration path. Fully tested.",
         known_exceptions=[
             "Encrypted credentials cannot be extracted from source API",
             "Instance groups referenced by RBAC assignments must exist on the target with the same name",
